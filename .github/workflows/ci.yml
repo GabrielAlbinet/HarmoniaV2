@@ -1,0 +1,163 @@
+name: CI de test pour le Back
+on: [push]
+
+env:
+  APP_SECRET: ${{ secrets.APP_SECRET }}
+  KERNEL_CLASS: ${{ secrets.KERNEL_CLASS}}
+  DATABASE_URL: ${{ secrets.DATABASE_URL }}
+  DEFAULT_URI: ${{ secrets.DEFAULT_URI}}
+
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Créer un .env vide
+        run: touch .env
+
+      - name: Installer PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          extensions: pdo_mysql
+
+      - name: Dépendances
+        run: composer install
+
+      - name: Mise en cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            vendor
+            assets/vendor
+          key: deps-${{ hashFiles('composer.lock', 'importmap.php') }}
+
+  lint:
+    needs: install
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Créer un .env vide
+        run: touch .env
+
+      - name: Installer PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          extensions: pdo_mysql
+
+      - name: Récupération du cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            vendor
+            assets/vendor
+          key: deps-${{ hashFiles('composer.lock', 'importmap.php') }}
+
+      - name: Lint du YAML
+        run: php bin/console lint:yaml config
+
+      - name: Lint des templates Twig
+        run: php bin/console lint:twig templates
+
+      - name: Lint de la config des services et du typage
+        run: php bin/console lint:container
+
+  cs-fixer:
+    needs: install
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Installer PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          extensions: pdo_mysql
+
+      - name: Récupération du cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            vendor
+            assets/vendor
+          key: deps-${{ hashFiles('composer.lock', 'importmap.php') }}
+
+      - name: CS-Fixer
+        run: vendor/bin/php-cs-fixer fix --dry-run --diff
+
+  phpstan:
+    needs: install
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Installer PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          extensions: pdo_mysql
+
+      - name: Récupération du cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            vendor
+            assets/vendor
+          key: deps-${{ hashFiles('composer.lock', 'importmap.php') }}
+
+      - name: PHPStan
+        run: vendor/bin/phpstan analyse src templates tests
+
+  test:
+    needs: [lint, phpstan, cs-fixer]
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: mariadb:10.6
+        env:
+          MYSQL_ROOT_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        ports:
+          - 3306:3306
+
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Créer un .env vide
+        run: touch .env
+
+      - name: Installer PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          extensions: pdo_mysql, intl
+
+      - name: Récupérer vendor depuis le cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            vendor
+            assets/vendor
+          key: deps-${{ hashFiles('composer.lock', 'importmap.php') }}
+
+      - name: Créer la base de test
+        run: php bin/console doctrine:database:create --if-not-exists --env=test
+
+      - name: Jouer les migrations
+        run: php bin/console doctrine:migrations:migrate --no-interaction --env=test
+
+      - name: Charger les données de test
+        run: mysql -h 127.0.0.1 -P 3306 -uroot -p${{ secrets.DB_PASSWORD }} harmonia_test < docker/harmonia.sql
+
+      - name: Tests
+        run: php bin/phpunit
